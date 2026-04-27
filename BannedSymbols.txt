@@ -1,0 +1,44 @@
+// Mikenakis.CommonFiles\BannedSymbols.txt
+//
+// Solution-wide banned symbols.
+// This file is used by Microsoft.CodeAnalysis.BannedApiAnalyzers
+//   Web site: https://github.com/dotnet/roslyn/tree/main/src/RoslynAnalyzers/Microsoft.CodeAnalysis.BannedApiAnalyzers
+//   NuGet package: https://www.nuget.org/packages/Microsoft.CodeAnalysis.BannedApiAnalyzers/
+//
+// PEARL: If you try adding this file to the "Solution Items" folder of a solution, Visual Studio will refuse with
+//    some ridiculous error message saying something along the lines that a project file cannot be added to the solution
+//    items. However, you can manually edit the solution file and add the file to it, and then everything is fine.
+// PEARL: The preposterous syntax that is used in this file for referring to lanugage constructs is called
+//    'documentation id'. The reference for it is here:
+//    https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/language-specification/documentation-comments#d42-id-string-format
+// PEARL: The slightest typo (including a space there where none is expected) will be met with SILENT FAILURE.
+
+M:System.Linq.Enumerable.ToArray`1(System.Collections.Generic.IEnumerable{``0}) ; Use `.Collect()` instead.
+//T:System.Collections.Generic.List`1 ; Use new MutableList<T>( enumerable ) instead.
+//M:System.Linq.Enumerable.ToList`1(System.Collections.Generic.IEnumerable{``0}) ; Use `new MutableList()` instead.
+//M:System.Linq.Enumerable.AsEnumerable`1(System.Collections.Generic.IEnumerable{``0}) ; 
+P:System.DateTime.Now ; Use `Clock` instead.
+P:System.DateTime.UtcNow ; Use `Clock` instead.
+M:System.DateTimeOffset.op_Implicit(System.DateTime) ; Do not implicitly cast DateTime to DateTimeOffset.
+T:System.IO.File ; Use `FilePath` instead.
+T:System.IO.Directory ; Use `DirectoryPath` instead.
+T:System.IO.Path ; Use `FilePath` or `DirectoryPath` instead.
+P:System.Text.Encoding.UTF8 ; Use DotNetHelpers.BomlessUtf8 instead.
+M:System.Object.ReferenceEquals(System.Object,System.Object) ; Use `object.ReferenceEquals( object )` instead, which only works for classes and is undefined for structs.
+
+//TODO:
+//M:System.Linq.Enumerable.SequenceEqual`1(System.Collections.Generic.IEnumerable{``0},System.Collections.Generic.IEnumerable{``0}) ; Use `DotNetHelpers.Equals()` instead.
+
+//T:Graphs.DirectedGraph`1;Don't use it
+
+// PEARL: The documentation for the `System.Diagnostics.Process.GetCurrentProcess()` method says that it returns a new
+//        object, and a quick examination of the source code confirms this. This means that each time you invoke this
+//        method, you are generating garbage. This can be very highly problematic if you are invoking this method in a
+//        loop while performing garbage collection: you are generating garbage while trying to collect garbage, adding
+//        more work to yourself. This does not work well. Furthermore, the `System.Diagnostics.Process` class is... (oh
+//        god... oh dear god... OH MY FUCKING GAWD!) ***disposable***. That's right, each time you invoke this method
+//        you must not forget to dispose what it returns. Even though the name of the function does not give the
+//        sligtest hint that you should do such a thing. It is with a fairly high degree of certainty that we can say
+//        that in the entire history of DotNet nobody ever bothered with disposing the result of GetCurrentProcess().
+//        We bring an end to this insanity right here.
+M:System.Diagnostics.Process.GetCurrentProcess() ; Use `DotNetHelpers.CurrentProcess` instead.

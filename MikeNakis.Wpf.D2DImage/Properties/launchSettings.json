@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "Experiment.D2DImage": {
+      "commandName": "Project",
+      "nativeDebugging": false
+    }
+  }
+}

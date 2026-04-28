@@ -31,12 +31,13 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 	public sealed class AlreadyInitializedException : Sys.Exception;
 
 	readonly LifeGuard lifeGuard;
-	readonly Dxgi.IDXGIFactory7 dxgiFactory = Dxgi.DXGI.CreateDXGIFactory2<Dxgi.IDXGIFactory7>( debug: DebugMode );
+	readonly Dxgi.IDXGIFactory6 dxgiFactory = Dxgi.DXGI.CreateDXGIFactory2<Dxgi.IDXGIFactory6>( debug: DebugMode );
 	readonly D2d.ID2D1Factory8 d2dFactory = D2d.D2D1.D2D1CreateFactory<D2d.ID2D1Factory8>( D2d.FactoryType.SingleThreaded, D2d.DebugLevel.Information );
 	readonly D3d9.IDirect3D9Ex d3d9 = D3d9.D3D9.Direct3DCreate9Ex();
 	readonly ushort adapterIndex;
 	readonly D3d11.ID3D11Device d3d11Device;
-	readonly D3d9.IDirect3DDevice9Ex d3d9Device;
+
+	D3d9.IDirect3DDevice9Ex? d3d9Device;
 
 	Wpf.FrameworkElement? parent;
 	D3d11.ID3D11Texture2D? d3d11Texture2d;
@@ -62,13 +63,23 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 	{
 		lifeGuard = LifeGuard.Create( collectStackTrace );
 		D3d11.DeviceCreationFlags creationFlags = D3d11.DeviceCreationFlags.BgraSupport | (DebugMode ? D3d11.DeviceCreationFlags.Debug : 0);
-		Dxgi.IDXGIAdapter adapter = findBestAdapter( dxgiFactory, Dxgi.GpuPreference.HighPerformance );
-		D3d11.D3D11.D3D11CreateDevice( adapter, D3d.DriverType.Unknown, //when specifying the adapter explicitly, this must not be D3d.DriverType.Hardware
+
+		Log.Debug( $"Adapters:" );
+		Log.Debug( $"    {"Index",-5} {"Description",-44} {"DedicatedSystemMemory",-21} {"DedicatedVideoMemory",-20} {"SharedSystemMemory",-20}" );
+		for( ushort adapterIndex = 0; dxgiFactory.EnumAdapterByGpuPreference( adapterIndex, Dxgi.GpuPreference.Unspecified, out Dxgi.IDXGIAdapter4? adapter ).Success; adapterIndex++ )
+		{
+			Assert( adapter != null );
+			Log.Debug( $"    {adapterIndex,-5} {adapter.Description.Description,-44} {adapter.Description.DedicatedSystemMemory,-21} {adapter.Description.DedicatedVideoMemory,-20} {adapter.Description.SharedSystemMemory,-20}" );
+			adapter.Release();
+		}
+
+		Dxgi.IDXGIAdapter bestAdapter = findBestAdapter( dxgiFactory, Dxgi.GpuPreference.HighPerformance );
+		adapterIndex = getAdapterIndex( dxgiFactory, bestAdapter );
+		Log.Debug( $"Best adapter: {bestAdapter.Description.Description}, index {adapterIndex}" );
+		D3d11.D3D11.D3D11CreateDevice( bestAdapter, D3d.DriverType.Unknown, //when specifying the adapter explicitly, this must not be D3d.DriverType.Hardware
 			creationFlags, featureLevels: null!, //PEARL: Vortice declares the featureLevels argument as non-nullable, but internally it does handle it as nullable.
 			out d3d11Device, out D3d11.ID3D11DeviceContext _ ).CheckError();
-		adapter.Dispose();
-		adapterIndex = getAdapterIndex( dxgiFactory, d3d11Device );
-		d3d9Device = createD3d9Device( d3d9, adapterIndex );
+		bestAdapter.Release();
 		IsFrontBufferAvailableChanged += onFrontBufferAvailableChanged;
 	}
 
@@ -77,9 +88,22 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 		Assert( lifeGuard.IsAliveAssertion() );
 		Assert( this.parent == null, () => throw new AlreadyInitializedException() );
 		this.parent = parent;
-		//Wpf.Window window = Wpf.Window.GetWindow( parent );
-		//nint deviceWindowHandle = new WpfInterop.WindowInteropHelper( window ).Handle;
 		parent.SizeChanged += onParentSizeChanged;
+
+		//PEARL: the documentation says "Creating a device requires an HWND. In general, you create a dummy HWND for
+		// Direct3D9 to use." They don't say a word about any non-general case where you must supply a non-dummy HWND.
+		//(See "Microsoft Learn: WPF and Direct3D9 Interoperation", https://learn.microsoft.com/en-us/dotnet/desktop/wpf/advanced/wpf-and-direct3d9-interoperation)
+		//Then they show how to create such a dummy HWND, and they do it by registering a dummy window class and
+		//creating a dummy invisible window out of it.
+		//However, using the desktop window works just as fine, which begs the question:
+		//why THE FUCK do they require a HWND in the first place?
+		nint deviceWindowHandle;
+		if( False )
+			deviceWindowHandle = GetDesktopWindow();
+		else
+			deviceWindowHandle = new WpfInterop.WindowInteropHelper( Wpf.Window.GetWindow( parent ) ).Handle;
+		d3d9Device = createD3d9Device( d3d9, adapterIndex, deviceWindowHandle );
+
 		allocateState();
 	}
 
@@ -100,7 +124,7 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 
 	void onParentSizeChanged( object sender, Wpf.SizeChangedEventArgs e )
 	{
-		Assert( parent != null );
+		Assert( isInitializedAssertion() );
 		freeState();
 		allocateState();
 	}
@@ -109,7 +133,9 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 	{
 		(uint deviceWidth, uint deviceHeight) = getDeviceSize( parent! );
 		d3d11Texture2d = createSharedD3d11Texture2d( d3d11Device, deviceWidth, deviceHeight );
-		d3d9Texture = createSharedD3d9Texture( d3d9Device!, d3d11Texture2d );
+		nint sharedHandle = getSharedHandle( d3d11Texture2d );
+		Assert( sharedHandle != 0 );
+		d3d9Texture = createSharedD3d9Texture( d3d9Device!, deviceWidth, deviceHeight, sharedHandle );
 		d3d9Surface = d3d9Texture.GetSurfaceLevel( 0 );
 		base.Lock();
 		base.SetBackBuffer( WpfInterop.D3DResourceType.IDirect3DSurface9, d3d9Surface.NativePointer );
@@ -160,21 +186,17 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 
 	public new void SetBackBuffer( WpfInterop.D3DResourceType backBufferType, nint backBuffer, bool enableSoftwareFallback ) => throw new Sys.NotImplementedException();
 
-	static D3d9.IDirect3DTexture9 createSharedD3d9Texture( D3d9.IDirect3DDevice9Ex d3d9Device, D3d11.ID3D11Texture2D d3d11Texture2d )
+	static D3d9.IDirect3DTexture9 createSharedD3d9Texture( D3d9.IDirect3DDevice9Ex d3d9Device, uint deviceWidth, uint deviceHeight, nint sharedHandle )
 	{
-		nint sharedHandle = getSharedHandle( d3d11Texture2d );
-		Assert( sharedHandle != 0 );
-		D3d11.Texture2DDescription textureDescription = d3d11Texture2d.Description;
-		uint width = textureDescription.Width;
-		uint height = textureDescription.Height;
-		Assert( textureDescription.Format == Dxgi.Format.B8G8R8A8_UNorm );
-		return d3d9Device.CreateTexture( width, height, 1, D3d9.Usage.RenderTarget, D3d9.Format.A8R8G8B8, D3d9.Pool.Default, ref sharedHandle );
+		return d3d9Device.CreateTexture( deviceWidth, deviceHeight, 1, D3d9.Usage.RenderTarget, D3d9.Format.A8R8G8B8, D3d9.Pool.Default, ref sharedHandle );
 	}
 
 	static nint getSharedHandle( D3d11.ID3D11Texture2D d3d11Texture2d )
 	{
-		using( Dxgi.IDXGIResource dxgiResource = d3d11Texture2d.QueryInterface<Dxgi.IDXGIResource>() )
-			return dxgiResource.SharedHandle;
+		Dxgi.IDXGIResource1 dxgiResource = d3d11Texture2d.QueryInterface<Dxgi.IDXGIResource1>();
+		nint sharedHandle = dxgiResource.SharedHandle;
+		dxgiResource.Release();
+		return sharedHandle;
 	}
 
 	static (uint deviceWidth, uint deviceHeight) getDeviceSize( Wpf.FrameworkElement frameworkElement )
@@ -188,19 +210,19 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 	static D2d.ID2D1RenderTarget createD2dRenderTarget( D2d.ID2D1Factory8 d2dFactory, D3d11.ID3D11Texture2D d3d11Texture2d )
 	{
 		Assert( d3d11Texture2d.Description.Format == Dxgi.Format.B8G8R8A8_UNorm );
-		using( Dxgi.IDXGISurface dxgiSurface = d3d11Texture2d.QueryInterface<Dxgi.IDXGISurface>() )
+		Dxgi.IDXGISurface dxgiSurface = d3d11Texture2d.QueryInterface<Dxgi.IDXGISurface>();
+		D2d.RenderTargetProperties renderTargetProperties = new()
 		{
-			D2d.RenderTargetProperties renderTargetProperties = new()
-			{
-				Type = D2d.RenderTargetType.Hardware,
-				PixelFormat = new( Dxgi.Format.B8G8R8A8_UNorm, DCommon.AlphaMode.Premultiplied ),
-				DpiX = 96.0f,
-				DpiY = 96.0f,
-				Usage = D2d.RenderTargetUsage.None,
-				MinLevel = D2d.FeatureLevel.Default
-			};
-			return d2dFactory.CreateDxgiSurfaceRenderTarget( dxgiSurface, renderTargetProperties );
-		}
+			Type = D2d.RenderTargetType.Hardware,
+			PixelFormat = new( Dxgi.Format.B8G8R8A8_UNorm, DCommon.AlphaMode.Premultiplied ),
+			DpiX = 96.0f,
+			DpiY = 96.0f,
+			Usage = D2d.RenderTargetUsage.None,
+			MinLevel = D2d.FeatureLevel.Default
+		};
+		D2d.ID2D1RenderTarget result = d2dFactory.CreateDxgiSurfaceRenderTarget( dxgiSurface, renderTargetProperties );
+		dxgiSurface.Release();
+		return result;
 	}
 
 	static D3d11.ID3D11Texture2D createSharedD3d11Texture2d( D3d11.ID3D11Device d3d11Device, uint deviceWidth, uint deviceHeight )
@@ -209,12 +231,14 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 		{
 			ArraySize = 1,
 			BindFlags = D3d11.BindFlags.RenderTarget,
+			CPUAccessFlags = D3d11.CpuAccessFlags.None,
 			Format = Dxgi.Format.B8G8R8A8_UNorm,
-			Width = deviceWidth,
-			Height = deviceHeight,
 			MipLevels = 1,
+			MiscFlags = D3d11.ResourceOptionFlags.Shared,
 			SampleDescription = Dxgi.SampleDescription.Default,
-			MiscFlags = D3d11.ResourceOptionFlags.Shared
+			Usage = D3d11.ResourceUsage.Default,
+			Width = deviceWidth,
+			Height = deviceHeight
 		};
 		D3d11.ID3D11Texture2D d3d11Texture2d = d3d11Device.CreateTexture2D( textureDescription );
 		Assert( d3d11Texture2d.QueryInterface<Dxgi.IDXGIResource>().SharedHandle != 0 );
@@ -223,17 +247,8 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 
 	[SysInterop.DllImport( "user32.dll", SetLastError = false ), SysInterop.DefaultDllImportSearchPaths( SysInterop.DllImportSearchPath.System32 )] static extern nint GetDesktopWindow();
 
-	static D3d9.IDirect3DDevice9Ex createD3d9Device( D3d9.IDirect3D9Ex d3d9, ushort adapterIndex )
+	static D3d9.IDirect3DDevice9Ex createD3d9Device( D3d9.IDirect3D9Ex d3d9, ushort adapterIndex, nint deviceWindowHandle )
 	{
-		//PEARL: the documentation says "Creating a device requires an HWND. In general, you create a dummy HWND for
-		// Direct3D9 to use." They don't say a word about any non-general case where you must supply a non-dummy HWND.
-		//(See "Microsoft Learn: WPF and Direct3D9 Interoperation", https://learn.microsoft.com/en-us/dotnet/desktop/wpf/advanced/wpf-and-direct3d9-interoperation)
-		//Then they show how to create such a dummy HWND, and they do it by registering a dummy window class and
-		//creating a dummy invisible window out of it.
-		//However, using the desktop window works just as fine, which begs the question:
-		//why THE FUCK do they require a HWND in the first place?
-		nint deviceWindowHandle = GetDesktopWindow();
-
 		D3d9.PresentParameters presentParameters = new()
 		{
 			Windowed = true,
@@ -243,32 +258,24 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 		};
 		//NOTE: Rumor has it that the Multithreaded flag must be added, despite the fact that we are not doing any
 		// multi-threading, because WPF is doing multi-threadfing.
-		D3d9.CreateFlags creationFlags = D3d9.CreateFlags.HardwareVertexProcessing | D3d9.CreateFlags.Multithreaded | D3d9.CreateFlags.FpuPreserve;
+		D3d9.CreateFlags creationFlags = D3d9.CreateFlags.HardwareVertexProcessing /*| D3d9.CreateFlags.Multithreaded*/;// | D3d9.CreateFlags.FpuPreserve;
 		return d3d9.CreateDeviceEx( adapterIndex /*0 = D3DADAPTER_DEFAULT*/, D3d9.DeviceType.Hardware, deviceWindowHandle, creationFlags, presentParameters );
 	}
 
-	static Dxgi.IDXGIAdapter findBestAdapter( Dxgi.IDXGIFactory7 dxgiFactory, Dxgi.GpuPreference gpuPreference )
+	static Dxgi.IDXGIAdapter findBestAdapter( Dxgi.IDXGIFactory6 dxgiFactory, Dxgi.GpuPreference gpuPreference )
 	{
-		dxgiFactory.EnumAdapterByGpuPreference( 0, gpuPreference, out Dxgi.IDXGIAdapter? dxgiAdapter ).CheckError();
+		dxgiFactory.EnumAdapterByGpuPreference( 0, gpuPreference, out Dxgi.IDXGIAdapter4? dxgiAdapter ).CheckError();
 		return dxgiAdapter.OrThrow();
 	}
 
-	ushort getAdapterIndex( Dxgi.IDXGIFactory dxgiFactory, D3d11.ID3D11Device d3d11Device )
+	ushort getAdapterIndex( Dxgi.IDXGIFactory dxgiFactory, Dxgi.IDXGIAdapter adapterToFind )
 	{
-		using( Dxgi.IDXGIDevice dxgiDevice = d3d11Device.QueryInterface<Dxgi.IDXGIDevice>() )
-		using( Dxgi.IDXGIAdapter adapter = dxgiDevice.GetAdapter() )
-			return getAdapterIndex( dxgiFactory, adapter );
-	}
-
-	ushort getAdapterIndex( Dxgi.IDXGIFactory dxgiFactory, Dxgi.IDXGIAdapter adapter )
-	{
-		Log.Debug( $"Adapter: {adapter.Description.Description}" );
-		for( ushort adapterIndex = 0; dxgiFactory.EnumAdapters( adapterIndex, out Dxgi.IDXGIAdapter thisAdapter ).Success; adapterIndex++ )
+		for( ushort adapterIndex = 0; dxgiFactory.EnumAdapters( adapterIndex, out Dxgi.IDXGIAdapter adapter ).Success; adapterIndex++ )
 		{
-			Log.Debug( $"   {adapterIndex}: {thisAdapter.Description.Description}" );
-			if( thisAdapter.Description.Description == adapter.Description.Description )
+			bool found = adapter.Description.Description == adapterToFind.Description.Description;
+			adapter.Release();
+			if( found )
 				return adapterIndex;
-			thisAdapter.Dispose();
 		}
 		throw new AssertionFailureException();
 	}

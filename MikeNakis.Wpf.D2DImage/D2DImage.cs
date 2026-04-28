@@ -145,7 +145,7 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 	public new void Lock()
 	{
 		Assert( isInitializedAssertion() );
-		Log.Debug( $"PixelWidth x PixelHeight = {PixelWidth} x {PixelHeight}" );
+		//Log.Debug( $"PixelWidth x PixelHeight = {PixelWidth} x {PixelHeight}" );
 		base.Lock();
 	}
 

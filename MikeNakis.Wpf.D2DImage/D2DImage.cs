@@ -296,13 +296,16 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 
 	static D3d9.IDirect3DDevice9Ex createD3d9Device( D3d9.IDirect3D9Ex d3d9, ushort adapterIndex, nint deviceWindowHandle )
 	{
-		//D3d9.DisplayMode displayMode = d3d9.GetAdapterDisplayMode( adapterIndex );
 		D3d9.PresentParameters presentParameters = new()
 		{
 			Windowed = true,
-			SwapEffect = D3d9.SwapEffect.Discard,
+			SwapEffect = D3d9.SwapEffect.FlipEx, //Discard works, Copy works, Overlay does not work
 			DeviceWindowHandle = deviceWindowHandle,
-			PresentationInterval = D3d9.PresentInterval.Immediate,
+			PresentationInterval = D3d9.PresentInterval.Immediate, //Note that there are more values, which Vortice does not seem to implement.
+			BackBufferCount = 1, //a value of 0 is treated as 1
+			BackBufferFormat = D3d9.Format.Unknown, //when in windowed mode, this can be 'unknown' and the current-display-mode format will be used.
+			BackBufferWidth = 1, //when BackBufferFormat is unknown, this can be any positive value and it will be overridden to the current display mode's width.
+			BackBufferHeight = 1, //when BackBufferFormat is unknown, this can be any positive value and it will be overridden to the current display mode's width.
 		};
 		//NOTE:
 		// The HardwareVertexProcessing seems to be necessary no matter what.

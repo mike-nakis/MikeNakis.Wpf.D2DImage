@@ -12,7 +12,6 @@ using DCommon = Vortice.DCommon;
 using Dxgi = Vortice.DXGI;
 using static MikeNakis.Kit.GlobalStatics;
 using MikeNakis.Kit;
-using MikeNakis.Kit.Extensions;
 using SysInterop = System.Runtime.InteropServices;
 
 // PEARL: System.Windows.Media.ImageSource apparently has an internal constructor to prevent us from extending it.
@@ -64,23 +63,70 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 		lifeGuard = LifeGuard.Create( collectStackTrace );
 		D3d11.DeviceCreationFlags creationFlags = D3d11.DeviceCreationFlags.BgraSupport | (DebugMode ? D3d11.DeviceCreationFlags.Debug : 0);
 
-		Log.Debug( $"Adapters:" );
-		Log.Debug( $"    {"Index",-5} {"Description",-44} {"DedicatedSystemMemory",-21} {"DedicatedVideoMemory",-20} {"SharedSystemMemory",-20}" );
+		Log.Debug( $"Adapters according to DXGI:" );
+		Log.Debug( $"    {"Index",-5} {"Description",-44} {"DeviceName",-15} {"Driver",-15} {"Width",6} {"Height",6} {"RefreshRate",11} {"Format",-8} {"DedicatedSystemMemory",-21} {"DedicatedVideoMemory",-20} {"SharedSystemMemory",-20} " );
 		for( ushort adapterIndex = 0; dxgiFactory.EnumAdapterByGpuPreference( adapterIndex, Dxgi.GpuPreference.Unspecified, out Dxgi.IDXGIAdapter4? adapter ).Success; adapterIndex++ )
 		{
 			Assert( adapter != null );
-			Log.Debug( $"    {adapterIndex,-5} {adapter.Description.Description,-44} {adapter.Description.DedicatedSystemMemory,-21} {adapter.Description.DedicatedVideoMemory,-20} {adapter.Description.SharedSystemMemory,-20}" );
+			bool isReal = adapter.Description.DedicatedVideoMemory != 0;
+			D3d9.AdapterIdentifier identifier = isReal ? getAdapterIdentifier( d3d9, adapterIndex ) : default;
+			D3d9.DisplayMode displayMode = isReal ? getAdapterDisplayMode( d3d9, adapterIndex ) : default;
+			Log.Debug( $"    {adapterIndex,-5} {adapter.Description.Description,-44} {identifier.DeviceName,-15} {identifier.Driver,-15} {displayMode.Width,6} {displayMode.Height,6} {displayMode.RefreshRate,11} {displayMode.Format,-8} {adapter.Description.DedicatedSystemMemory,-21} {adapter.Description.DedicatedVideoMemory,-20} {adapter.Description.SharedSystemMemory,-20}" );
 			adapter.Release();
 		}
 
-		Dxgi.IDXGIAdapter bestAdapter = findBestAdapter( dxgiFactory, Dxgi.GpuPreference.HighPerformance );
+		Log.Debug( $"Adapters according to D9D9:" );
+		Log.Debug( $"    {"Index",-5} {"Description",-44} {"DeviceName",-15} {"Driver",-15} {"Width",6} {"Height",6} {"RefreshRate",11} {"Format",-8}" );
+		uint adapterCount = d3d9.AdapterCount;
+		for( ushort adapterIndex = 0; adapterIndex < adapterCount; adapterIndex++ )
+		{
+			D3d9.AdapterIdentifier identifier = d3d9.GetAdapterIdentifier( adapterIndex );
+			D3d9.DisplayMode displayMode = d3d9.GetAdapterDisplayMode( adapterIndex );
+			nint monitorHandle = d3d9.GetAdapterMonitor( adapterIndex );
+			MONITORINFOEX monitorInfoEx = MONITORINFOEX.Create();
+			bool ok = GetMonitorInfo( monitorHandle, ref monitorInfoEx );
+			Assert( ok );
+			Log.Debug( $"    {adapterIndex,-5} {identifier.Description,-44} {identifier.DeviceName,-15} {identifier.Driver,-15} {displayMode.Width,6} {displayMode.Height,6} {displayMode.RefreshRate,11} {displayMode.Format,-8}" );
+		}
+
+		Dxgi.IDXGIAdapter bestAdapter = findBestAdapter( dxgiFactory, d3d9, Dxgi.GpuPreference.HighPerformance );
 		adapterIndex = getAdapterIndex( dxgiFactory, bestAdapter );
 		Log.Debug( $"Best adapter: {bestAdapter.Description.Description}, index {adapterIndex}" );
-		D3d11.D3D11.D3D11CreateDevice( bestAdapter, D3d.DriverType.Unknown, //when specifying the adapter explicitly, this must not be D3d.DriverType.Hardware
+		D3d11.D3D11.D3D11CreateDevice( bestAdapter, D3d.DriverType.Unknown, //when specifying the adapter explicitly, this must NOT be D3d.DriverType.Hardware.
 			creationFlags, featureLevels: null!, //PEARL: Vortice declares the featureLevels argument as non-nullable, but internally it does handle it as nullable.
 			out d3d11Device, out D3d11.ID3D11DeviceContext _ ).CheckError();
 		bestAdapter.Release();
 		IsFrontBufferAvailableChanged += onFrontBufferAvailableChanged;
+	}
+
+	// PEARL: Vortice offers only one version of D3D9.GetAdapterIdentifier() which will throw if the native function
+	// returns an errorcode; however, the native function may return an error code under very normal circumstances,
+	// such as when the adapter is a software adapter. 
+	static D3d9.AdapterIdentifier getAdapterIdentifier( D3d9.IDirect3D9Ex d3d9, ushort adapterIndex )
+	{
+		try
+		{
+			return d3d9.GetAdapterIdentifier( adapterIndex );
+		}
+		catch( Sys.Exception )
+		{
+			return default;
+		}
+	}
+
+	// PEARL: Vortice offers only one version of D3D9.GetAdapterDisplayMode() which will throw if the native function
+	// returns an errorcode; however, the native function may return an error code under very normal circumstances,
+	// such as when the adapter is a software adapter.
+	static D3d9.DisplayMode getAdapterDisplayMode( D3d9.IDirect3D9Ex d3d9, ushort adapterIndex )
+	{
+		try
+		{
+			return d3d9.GetAdapterDisplayMode( adapterIndex );
+		}
+		catch( Sys.Exception )
+		{
+			return default;
+		}
 	}
 
 	public void Initialize( Wpf.FrameworkElement parent )
@@ -91,17 +137,19 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 		parent.SizeChanged += onParentSizeChanged;
 
 		//PEARL: the documentation says "Creating a device requires an HWND. In general, you create a dummy HWND for
-		// Direct3D9 to use." They don't say a word about any non-general case where you must supply a non-dummy HWND.
-		//(See "Microsoft Learn: WPF and Direct3D9 Interoperation", https://learn.microsoft.com/en-us/dotnet/desktop/wpf/advanced/wpf-and-direct3d9-interoperation)
-		//Then they show how to create such a dummy HWND, and they do it by registering a dummy window class and
-		//creating a dummy invisible window out of it.
-		//However, using the desktop window works just as fine, which begs the question:
-		//why THE FUCK do they require a HWND in the first place?
+		//    Direct3D9 to use." They don't say a word about any non-general cases where you might want to supply a
+		//    non-dummy HWND.
+		//    (See "Microsoft Learn: WPF and Direct3D9 Interoperation", https://learn.microsoft.com/en-us/dotnet/desktop/wpf/advanced/wpf-and-direct3d9-interoperation)
+		//    Then they show how to create such a dummy HWND, and they do it by registering a dummy window class and
+		//    creating a dummy invisible window out of it.
+		//    However, using the desktop window works just as fine, which begs the question:
+		//    why THE FUCK do they require a HWND in the first place?
 		nint deviceWindowHandle;
 		if( False )
 			deviceWindowHandle = GetDesktopWindow();
 		else
 			deviceWindowHandle = new WpfInterop.WindowInteropHelper( Wpf.Window.GetWindow( parent ) ).Handle;
+		Assert( deviceWindowHandle != 0 );
 		d3d9Device = createD3d9Device( d3d9, adapterIndex, deviceWindowHandle );
 
 		allocateState();
@@ -209,12 +257,11 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 
 	static D2d.ID2D1RenderTarget createD2dRenderTarget( D2d.ID2D1Factory8 d2dFactory, D3d11.ID3D11Texture2D d3d11Texture2d )
 	{
-		Assert( d3d11Texture2d.Description.Format == Dxgi.Format.B8G8R8A8_UNorm );
 		Dxgi.IDXGISurface dxgiSurface = d3d11Texture2d.QueryInterface<Dxgi.IDXGISurface>();
 		D2d.RenderTargetProperties renderTargetProperties = new()
 		{
 			Type = D2d.RenderTargetType.Hardware,
-			PixelFormat = new( Dxgi.Format.B8G8R8A8_UNorm, DCommon.AlphaMode.Premultiplied ),
+			PixelFormat = new( d3d11Texture2d.Description.Format, DCommon.AlphaMode.Premultiplied ),
 			DpiX = 96.0f,
 			DpiY = 96.0f,
 			Usage = D2d.RenderTargetUsage.None,
@@ -249,26 +296,51 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 
 	static D3d9.IDirect3DDevice9Ex createD3d9Device( D3d9.IDirect3D9Ex d3d9, ushort adapterIndex, nint deviceWindowHandle )
 	{
+		//D3d9.DisplayMode displayMode = d3d9.GetAdapterDisplayMode( adapterIndex );
 		D3d9.PresentParameters presentParameters = new()
 		{
 			Windowed = true,
 			SwapEffect = D3d9.SwapEffect.Discard,
 			DeviceWindowHandle = deviceWindowHandle,
-			PresentationInterval = D3d9.PresentInterval.Immediate
+			PresentationInterval = D3d9.PresentInterval.Immediate,
 		};
-		//NOTE: Rumor has it that the Multithreaded flag must be added, despite the fact that we are not doing any
-		// multi-threading, because WPF is doing multi-threadfing.
-		D3d9.CreateFlags creationFlags = D3d9.CreateFlags.HardwareVertexProcessing /*| D3d9.CreateFlags.Multithreaded*/;// | D3d9.CreateFlags.FpuPreserve;
-		return d3d9.CreateDeviceEx( adapterIndex /*0 = D3DADAPTER_DEFAULT*/, D3d9.DeviceType.Hardware, deviceWindowHandle, creationFlags, presentParameters );
+		//NOTE:
+		// The HardwareVertexProcessing seems to be necessary no matter what.
+		// The Multithreaded flag must be added according to rumours, because WPF does multi-threading, even if we don't.
+		// The FpuPreserve flag should be added, also according to rumours.
+		D3d9.CreateFlags creationFlags = D3d9.CreateFlags.HardwareVertexProcessing | D3d9.CreateFlags.Multithreaded | D3d9.CreateFlags.FpuPreserve;
+		return d3d9.CreateDeviceEx( adapterIndex, D3d9.DeviceType.Hardware, deviceWindowHandle, creationFlags, presentParameters );
 	}
 
-	static Dxgi.IDXGIAdapter findBestAdapter( Dxgi.IDXGIFactory6 dxgiFactory, Dxgi.GpuPreference gpuPreference )
+	static Dxgi.IDXGIAdapter findBestAdapter( Dxgi.IDXGIFactory6 dxgiFactory, D3d9.IDirect3D9Ex d3d9, Dxgi.GpuPreference gpuPreference )
 	{
-		dxgiFactory.EnumAdapterByGpuPreference( 0, gpuPreference, out Dxgi.IDXGIAdapter4? dxgiAdapter ).CheckError();
-		return dxgiAdapter.OrThrow();
+		for( ushort bestAdapterIndex = 0; dxgiFactory.EnumAdapterByGpuPreference( bestAdapterIndex, gpuPreference, out Dxgi.IDXGIAdapter4? adapter ).Success; bestAdapterIndex++ )
+		{
+			Assert( adapter != null );
+			ushort adapterIndex = getAdapterIndex( dxgiFactory, adapter );
+
+			if( !d3d9.CheckDeviceType( adapterIndex, D3d9.DeviceType.Hardware, D3d9.Format.X8R8G8B8, D3d9.Format.X8R8G8B8, windowed: true ).Success )
+			{
+				Log.Debug( "Adapter \"" + adapter.Description.Description + "\" does not support the required format, skipping it." );
+			}
+			else
+			{
+				try
+				{
+					d3d9.GetAdapterIdentifier( adapterIndex );
+					return adapter;
+				}
+				catch( Sys.Exception )
+				{
+					Log.Debug( "Adapter \"" + adapter.Description.Description + "\" is erroring, skipping it." );
+				}
+			}
+			adapter.Release();
+		}
+		throw new AssertionFailureException();
 	}
 
-	ushort getAdapterIndex( Dxgi.IDXGIFactory dxgiFactory, Dxgi.IDXGIAdapter adapterToFind )
+	static ushort getAdapterIndex( Dxgi.IDXGIFactory dxgiFactory, Dxgi.IDXGIAdapter adapterToFind )
 	{
 		for( ushort adapterIndex = 0; dxgiFactory.EnumAdapters( adapterIndex, out Dxgi.IDXGIAdapter adapter ).Success; adapterIndex++ )
 		{
@@ -279,4 +351,15 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 		}
 		throw new AssertionFailureException();
 	}
+
+	/// <summary>The GetMonitorInfo function retrieves information about a display monitor.</summary>
+	/// <param name="hMonitor">A handle to the display monitor of interest.</param>
+	/// <param name="monitorInfoEx"><see cref="MONITORINFOEX"/> structure that receives information about the specified
+	/// display monitor. You must set the <b>cbSize</b> member of the structure to sizeof(MONITORINFOEX) before
+	/// calling the <b>GetMonitorInfo</b> function. Doing so lets the function determine the type of structure you are
+	/// passing to it.</param>
+	/// <returns>If the function succeeds, the return value is nonzero. If the function fails, the return value is zero.</returns>
+	[SysInterop.DllImport( "USER32.dll", ExactSpelling = true, EntryPoint = "GetMonitorInfoW" )]
+	[SysInterop.DefaultDllImportSearchPaths( SysInterop.DllImportSearchPath.System32 )]
+	static extern bool GetMonitorInfo( nint hMonitor, ref MONITORINFOEX monitorInfoEx );
 }

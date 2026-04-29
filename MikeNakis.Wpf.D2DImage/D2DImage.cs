@@ -142,14 +142,10 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 		//    (See "Microsoft Learn: WPF and Direct3D9 Interoperation", https://learn.microsoft.com/en-us/dotnet/desktop/wpf/advanced/wpf-and-direct3d9-interoperation)
 		//    Then they show how to create such a dummy HWND, and they do it by registering a dummy window class and
 		//    creating a dummy invisible window out of it.
-		//    However, using the desktop window works just as fine, which begs the question:
-		//    why THE FUCK do they require a HWND in the first place?
-		nint deviceWindowHandle;
-		if( False )
-			deviceWindowHandle = GetDesktopWindow();
-		else
-			deviceWindowHandle = new WpfInterop.WindowInteropHelper( Wpf.Window.GetWindow( parent ) ).Handle;
+		//    Rumor has it that the desktop window is not suitable for this purpose, so we use the application window.
+		nint deviceWindowHandle = new WpfInterop.WindowInteropHelper( Wpf.Window.GetWindow( parent ) ).Handle;
 		Assert( deviceWindowHandle != 0 );
+
 		d3d9Device = createD3d9Device( d3d9, adapterIndex, deviceWindowHandle );
 
 		allocateState();
@@ -292,8 +288,6 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 		return d3d11Texture2d;
 	}
 
-	[SysInterop.DllImport( "user32.dll", SetLastError = false ), SysInterop.DefaultDllImportSearchPaths( SysInterop.DllImportSearchPath.System32 )] static extern nint GetDesktopWindow();
-
 	static D3d9.IDirect3DDevice9Ex createD3d9Device( D3d9.IDirect3D9Ex d3d9, ushort adapterIndex, nint deviceWindowHandle )
 	{
 		D3d9.PresentParameters presentParameters = new()
@@ -362,7 +356,18 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 	/// calling the <b>GetMonitorInfo</b> function. Doing so lets the function determine the type of structure you are
 	/// passing to it.</param>
 	/// <returns>If the function succeeds, the return value is nonzero. If the function fails, the return value is zero.</returns>
-	[SysInterop.DllImport( "USER32.dll", ExactSpelling = true, EntryPoint = "GetMonitorInfoW" )]
+	[SysInterop.DllImport( "user32.dll", ExactSpelling = true, EntryPoint = "GetMonitorInfoW" )]
 	[SysInterop.DefaultDllImportSearchPaths( SysInterop.DllImportSearchPath.System32 )]
 	static extern bool GetMonitorInfo( nint hMonitor, ref MONITORINFOEX monitorInfoEx );
+
+	public enum MonitorFlags : uint
+	{
+		MONITOR_DEFAULTTONULL = 0,
+		MONITOR_DEFAULTTOPRIMARY = 1,
+		MONITOR_DEFAULTTONEAREST = 2
+	}
+
+	[SysInterop.DllImport( "user32.dll" )]
+	[SysInterop.DefaultDllImportSearchPaths( SysInterop.DllImportSearchPath.System32 )]
+	static extern nint MonitorFromWindow( nint hWnd, MonitorFlags dwFlags );
 }

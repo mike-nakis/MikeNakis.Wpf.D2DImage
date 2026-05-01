@@ -12,6 +12,7 @@ using DCommon = Vortice.DCommon;
 using Dxgi = Vortice.DXGI;
 using static MikeNakis.Kit.GlobalStatics;
 using MikeNakis.Kit;
+using MikeNakis.Kit.Extensions;
 
 // PEARL: System.Windows.Media.ImageSource apparently has an internal constructor to prevent us from extending it.
 //   So, we cannot implement an image source aggregating an instance of System.Windows.Interop.D3DImage; instead,
@@ -25,12 +26,14 @@ using MikeNakis.Kit;
 //   So, you are expected to GUESS that the base class secretly has no accessible constructor.
 public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 {
+	static bool debug => false; //DebugMode;
+
 	public sealed class NotInitializedException : Sys.Exception;
 	public sealed class AlreadyInitializedException : Sys.Exception;
 
 	readonly LifeGuard lifeGuard;
-	readonly Dxgi.IDXGIFactory6 dxgiFactory = Dxgi.DXGI.CreateDXGIFactory2<Dxgi.IDXGIFactory6>( debug: DebugMode );
-	readonly D2d.ID2D1Factory8 d2dFactory = D2d.D2D1.D2D1CreateFactory<D2d.ID2D1Factory8>( D2d.FactoryType.SingleThreaded, D2d.DebugLevel.Information );
+	readonly Dxgi.IDXGIFactory6 dxgiFactory = Dxgi.DXGI.CreateDXGIFactory2<Dxgi.IDXGIFactory6>( debug: debug );
+	readonly D2d.ID2D1Factory8 d2dFactory = D2d.D2D1.D2D1CreateFactory<D2d.ID2D1Factory8>( D2d.FactoryType.SingleThreaded, debug ? D2d.DebugLevel.Information : D2d.DebugLevel.None );
 	readonly D3d9.IDirect3D9Ex d3d9 = D3d9.D3D9.Direct3DCreate9Ex();
 	readonly ushort adapterIndex;
 	readonly D3d11.ID3D11Device d3d11Device;
@@ -38,19 +41,11 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 	D3d9.IDirect3DDevice9Ex? d3d9Device;
 
 	Wpf.FrameworkElement? parent;
+	Sys.Action<nint>? realizeRenderTarget;
 	D3d11.ID3D11Texture2D? d3d11Texture2d;
 	D3d9.IDirect3DTexture9? d3d9Texture;
 	D3d9.IDirect3DSurface9? d3d9Surface;
 	D2d.ID2D1RenderTarget? d2dRenderTarget;
-
-	public nint D2DRenderTarget
-	{
-		get
-		{
-			Assert( isInitializedAssertion() );
-			return d2dRenderTarget!.NativePointer;
-		}
-	}
 
 	public D2DImage()
 		: this( false )
@@ -60,7 +55,7 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 	public D2DImage( bool collectStackTrace )
 	{
 		lifeGuard = LifeGuard.Create( collectStackTrace );
-		D3d11.DeviceCreationFlags creationFlags = D3d11.DeviceCreationFlags.BgraSupport | (DebugMode ? D3d11.DeviceCreationFlags.Debug : 0);
+		D3d11.DeviceCreationFlags creationFlags = D3d11.DeviceCreationFlags.BgraSupport | (debug ? D3d11.DeviceCreationFlags.Debug : 0);
 		Dxgi.IDXGIAdapter bestAdapter = findBestAdapter( dxgiFactory, d3d9, Dxgi.GpuPreference.HighPerformance );
 		adapterIndex = getAdapterIndex( dxgiFactory, bestAdapter );
 		Log.Debug( $"Best adapter: {bestAdapter.Description.Description}, index {adapterIndex}" );
@@ -71,12 +66,14 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 		IsFrontBufferAvailableChanged += onFrontBufferAvailableChanged;
 	}
 
-	public void Initialize( Wpf.FrameworkElement parent )
+	public void Initialize( Wpf.FrameworkElement parent, Sys.Action<nint> realizeRenderTarget )
 	{
 		Assert( lifeGuard.IsAliveAssertion() );
 		Assert( this.parent == null, () => throw new AlreadyInitializedException() );
 		this.parent = parent;
+		this.realizeRenderTarget = realizeRenderTarget;
 		parent.SizeChanged += onParentSizeChanged;
+		Wpf.Window.GetWindow( parent ).DpiChanged += onDpiChanged;
 
 		//PEARL: the documentation says "Creating a device requires an HWND. In general, you create a dummy HWND for
 		//    Direct3D9 to use." They don't say a word about any non-general cases where you might want to supply a
@@ -98,6 +95,7 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 		lifeGuard.Dispose();
 		if( parent != null )
 		{
+			Wpf.Window.GetWindow( parent ).DpiChanged -= onDpiChanged;
 			parent.SizeChanged -= onParentSizeChanged;
 			freeState();
 		}
@@ -111,6 +109,19 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 	void onParentSizeChanged( object sender, Wpf.SizeChangedEventArgs e )
 	{
 		Assert( isInitializedAssertion() );
+		Assert( sender.ReferenceEquals( parent ) );
+		resize();
+	}
+
+	void onDpiChanged( object sender, Wpf.DpiChangedEventArgs e )
+	{
+		Assert( isInitializedAssertion() );
+		Assert( sender.ReferenceEquals( Wpf.Window.GetWindow( parent ) ) );
+		resize();
+	}
+
+	void resize()
+	{
 		freeState();
 		allocateState();
 	}
@@ -127,6 +138,7 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 		base.SetBackBuffer( WpfInterop.D3DResourceType.IDirect3DSurface9, d3d9Surface.NativePointer );
 		base.Unlock();
 		d2dRenderTarget = createD2dRenderTarget( d2dFactory, d3d11Texture2d );
+		realizeRenderTarget!.Invoke( d2dRenderTarget.NativePointer );
 	}
 
 	void freeState()
@@ -264,11 +276,8 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 			ushort adapterIndex = getAdapterIndex( dxgiFactory, adapter );
 
 			if( !d3d9.CheckDeviceType( adapterIndex, D3d9.DeviceType.Hardware, D3d9.Format.X8R8G8B8, D3d9.Format.X8R8G8B8, windowed: true ).Success )
-			{
 				Log.Debug( "Adapter \"" + adapter.Description.Description + "\" does not support the required format, skipping it." );
-			}
 			else
-			{
 				try
 				{
 					d3d9.GetAdapterIdentifier( adapterIndex );
@@ -278,7 +287,6 @@ public class D2DImage : WpfInterop.D3DImage, Sys.IDisposable
 				{
 					Log.Debug( "Adapter \"" + adapter.Description.Description + "\" is erroring, skipping it." );
 				}
-			}
 			adapter.Release();
 		}
 		throw new AssertionFailureException();

@@ -1132,7 +1132,7 @@ dotnet_diagnostic.CA1063.severity = none
 #    Do not implement IDisposable the way Microsoft suggests.
 #    Use a 'LifeGuard' instead.
 #    See michael.gr - Mandatory disposal vs. the "Dispose-disposing" abomination
-#    https://blog.michael.gr/2015/03/on-dispose-bool-disposing-abomination.html
+#    https://blog.michael.gr/post/2015-03-on-dispose-bool-disposing-abomination/
 
 # CA1064: "Exceptions should be public"
 dotnet_diagnostic.CA1064.severity = warning
